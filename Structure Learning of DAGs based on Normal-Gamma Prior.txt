@@ -1,0 +1,756 @@
+rDAG = function(q, w){
+  DAG = matrix(0, q, q); colnames(DAG) = rownames(DAG) = 1:q
+  DAG[lower.tri(DAG)] = stats::rbinom(n = q*(q-1)/2, size = 1, prob = w)
+  return(DAG)
+}
+
+
+
+
+pa <- function(node, DAG) {
+  pa <- which(DAG[,node] != 0)
+  return(pa)
+}
+
+
+fa <- function(node, DAG) {
+  pa <- which(DAG[,node] != 0)
+  fa <- c(node, pa)
+  return(fa)
+}
+
+
+rnodeDAGWishart <- function(node, DAG, aj, U) {
+  q <- ncol(data)
+  n <- nrow(data)
+
+  j <- node
+  pa <- pa(j, DAG)
+
+  out <- list(sigmaj = 0, Lj = 0)
+
+  if (length(pa) == 0) {
+    U_jj <- U[j,j]
+    out$sigmaj <- stats::rgamma(1, shape = aj/2, rate = U_jj/2)
+  } else {
+    U_paj.j <- U[pa,j]
+    invU_papa <- solve(U[pa,pa])
+    U_jj <- U[j,j] - t(U_paj.j)%*%invU_papa%*%U_paj.j
+
+    out$sigmaj <- stats::rgamma(1, shape = aj/2, rate = U_jj/2)
+    out$Lj <- mvtnorm::rmvnorm(1, -invU_papa%*%U_paj.j, out$sigmaj*invU_papa)
+  }
+
+  return(out)
+}
+
+
+rDAGWishart <- function(n, DAG, a, U) {
+
+  q <- ncol(DAG)
+  ajs <- sapply(1:q, function(j) a+sum(DAG[,j]==1)-q+1)
+
+  L.array <- array(0, dim = c(q,q,n))
+  D.array <- array(0, dim = c(q,q,n))
+
+  for (i in 1:n) {
+    params <- lapply(1:q, function(j) rnodeDAGWishart(j, DAG, ajs[j], U))
+
+    sigmas <- sapply(1:q, function(x) params[[x]]$sigmaj)
+    L <- lapply(1:q, function(x) params[[x]]$Lj)
+
+    D.array[,,i] <- diag(sigmas)
+    for (j in 1:q) {
+      whc <- which(DAG[,j] == 1)
+      L.array[whc,j,i] <- as.numeric(L[[j]])
+    }
+    diag(L.array[,,i]) <- 1
+  }
+
+  if (n == 1) {
+    D.array <- D.array[,,1]
+    L.array <- L.array[,,1]
+  }
+
+  return(list(D = D.array, L = L.array))
+}
+
+
+
+
+rnodeDAGWishart1 <- function(node, DAG, aj, U, tXX, data) {
+  q <- ncol(data)
+  n <- nrow(data)
+
+  j <- node
+  pa <-pa(j, DAG)
+  Upost <- U + tXX
+  out <- list(sigmaj = 0, Lj = 0)
+
+  if (length(pa) == 0) {
+    U_jj <- U[j, j]
+    ratee <- 0.5 * (tXX[j, j])
+    out$sigmaj <- stats::rgamma(1, shape = -aj/2 + n/2, rate = ratee)^-1*stats::rgamma(1, shape =1, rate = 0.5*U_jj)
+  } else {
+    U_paj.j <- U[pa, j]
+    Upost_paj.j <- Upost[pa, j]
+    invU_papa <- solve(U[pa, pa])
+    invUpost_papa <- solve(Upost[pa, pa])
+    U_jj <- U[j, j] - t(U_paj.j) %*% invU_papa %*% U_paj.j
+    ratee <- 0.5 * (-t(Upost_paj.j) %*% solve(Upost[pa, pa]) %*% Upost_paj.j +
+                    t(U_paj.j) %*% solve(U[pa, pa]) %*% U_paj.j + tXX[j, j])
+ out$sigmaj <- stats::rgamma(1, shape = -aj/2 + n/2, rate = ratee)^-1*stats::rgamma(1, shape =1, rate = 0.5*U_jj)
+    out$Lj<- mvtnorm::rmvnorm(1, -invUpost_papa %*% Upost_paj.j, out$sigmaj * invUpost_papa)
+  }
+  return(out)
+}
+
+
+rDAGWishart1 <- function(n, DAG, a, U,tXX, data) {
+
+  q <- ncol(DAG)
+  ajs <- sapply(1:q, function(j) a+sum(DAG[,j]==1)-q+1)
+
+  L.array <- array(0, dim = c(q,q,n))
+  D.array <- array(0, dim = c(q,q,n))
+
+  for (i in 1:n) {
+    params <- lapply(1:q, function(j) rnodeDAGWishart1(j, DAG, ajs[j], U,tXX, data))
+
+    sigmas <- sapply(1:q, function(x) params[[x]]$sigmaj)
+    L <- lapply(1:q, function(x) params[[x]]$Lj)
+
+    D.array[,,i] <- diag(sigmas)
+    for (j in 1:q) {
+      whc <- which(DAG[,j] == 1)
+      L.array[whc,j,i] <- as.numeric(L[[j]])
+    }
+    diag(L.array[,,i]) <- 1
+  }
+
+  if (n == 1) {
+    D.array <- D.array[,,1]
+    L.array <- L.array[,,1]
+  }
+
+  return(list(D = D.array, L = L.array))
+}
+
+
+
+
+
+DW_nodelml <- function(node, DAG, tXX, n, a, U) {
+  j <- node
+  pa <- pa(j, DAG)
+  q <- ncol(tXX)
+
+  a.star <- (a+length(pa)-q+1)
+
+
+  Upost <- U + tXX
+
+  if (length(pa) == 0) {
+  U_jj <- U[j,j]
+    
+  alpha=0.5*(tXX[j,j])
+  beta=0.5*U_jj
+  a_bessel=0.5*(a.star-n)
+  nodelml <- -n/2*log(2*pi) + a.star/2*log(U_jj/2)-lgamma(a.star/2)+2*BesselH(1,2*sqrt(alpha*beta),a_bessel,expon.scaled = FALSE,nSeq = 1,verbose = 0)*((alpha/beta)^(a_bessel/2))
+  
+  }
+ else {
+    U_paj.j <- U[pa,j]
+    U_jj <- U[j,j] - t(U_paj.j)%*%solve(U[pa,pa])%*%U_paj.j
+    Upost_paj.j <- Upost[pa,j]
+    Upost_jj <- Upost[j,j] - t(Upost_paj.j)%*%solve(Upost[pa,pa])%*%Upost_paj.j
+
+    alpha=0.5*(- t(Upost_paj.j)%*%solve(Upost[pa,pa])%*%Upost_paj.j+t(U_paj.j)%*%solve(U[pa,pa])%*%U_paj.j+tXX[j,j])
+    beta=0.5*U_jj
+    a_bessel=0.5*(a.star-n)
+    nodelml <- -n/2*log(2*pi)+0.5*log(det(as.matrix(U[pa,pa])))-0.5*log(det(as.matrix(Upost[pa,pa])))+ a.star/2*log(U_jj/2)-lgamma(a.star/2)+2*BesselH(1,2*sqrt(alpha*beta),a_bessel,expon.scaled = FALSE,nSeq = 1,verbose = 0)*((alpha/beta)^(a_bessel/2))
+
+  }
+  return(Re(nodelml))
+}
+
+
+
+
+operation <- function(op, A, nodes) {
+  x <- nodes[1]
+  y <- nodes[2]
+
+  if(op == 1) {
+    A[x,y] = 1
+    return(A)
+  }
+
+  if(op == 2) {
+    A[x,y] = 0
+    return(A)
+  }
+
+  if(op == 3) {
+    A[x,y] = 0
+    A[y,x] = 1
+    return(A)
+  }
+}
+
+
+
+get_opcard <- function(DAG) {
+  A <- DAG
+  q <- ncol(A)
+  A_na <- A
+  diag(A_na) <- NA
+  
+  id_set = c()
+  dd_set = c()
+  rd_set = c()
+  
+  
+  set_id = which(A_na == 0, TRUE)
+  if(length(set_id) != 0){
+    id_set = cbind(1, set_id)
+  }
+  
+  
+  set_dd = which(A_na == 1, TRUE)
+  if(length(set_dd != 0)){
+    dd_set = cbind(2, set_dd)
+  }
+  
+  
+  set_rd = which(A_na == 1, TRUE)
+  if(length(set_rd != 0)){
+    rd_set = cbind(3, set_rd)
+  }
+  O=rbind(id_set,dd_set,rd_set) 
+  op.cardvec <- vector(length = nrow(O))
+  for (i in 1:nrow(O)) {
+    op.cardvec[i] <- gRbase::is.DAG(operation(O[i,1], DAG, O[i,2:3]))
+  }
+  op.card <- sum(op.cardvec)
+  list(O=O,op.card=op.card,op.cardvec=op.cardvec)
+}
+
+
+
+propose_DAG <- function(DAG, fast) {
+  A <- DAG
+  q <- ncol(A)
+  A_na <- A
+  diag(A_na) <- NA
+  
+  id_set = c()
+  dd_set = c()
+  rd_set = c()
+  
+  
+  set_id = which(A_na == 0, TRUE)
+  if(length(set_id) != 0){
+    id_set = cbind(1, set_id)
+  }
+  
+  
+  set_dd = which(A_na == 1, TRUE)
+  if(length(set_dd != 0)){
+    dd_set = cbind(2, set_dd)
+  }
+  
+  
+  set_rd = which(A_na == 1, TRUE)
+  if(length(set_rd != 0)){
+    rd_set = cbind(3, set_rd)
+  }
+  O=rbind(id_set,dd_set,rd_set) 
+  if (fast == FALSE) {
+    proposed.opcardvec <- vector(length = nrow(O))
+    for (i in 1:nrow(O)) {
+      proposed.opcardvec[i] <- gRbase::is.DAG(operation(O[i,1], DAG, O[i,2:3]))
+    }
+    proposed.opcard <- sum(proposed.opcardvec)
+    i <- sample(which(proposed.opcardvec), 1)
+    A_next <- operation(O[i,1], A, O[i,2:3])
+    current.opcard <- get_opcard(A_next)
+  } else {
+    repeat {
+      i <- sample(nrow(O), 1)
+      A_next <- operation(O[i,1], A, O[i,2:3])
+      verify <- gRbase::is.DAG(A_next)
+      
+      if (verify == TRUE) {
+        break
+      }
+    }
+    proposed.opcard <- nrow(O)
+    current.opcard <- nrow(O)
+  }
+  
+  op.type <- O[i,1]
+  if (op.type == 3) {
+    op.node <- O[i,-1]
+  } else {
+    op.node <- O[i,3]
+  }
+  
+  return(list(proposedDAG = A_next, op.type = op.type, op.node = op.node,
+              current.opcard = current.opcard, proposed.opcard = proposed.opcard))
+}
+
+
+
+acceptreject_DAG <- function(tXX, n, currentDAG, proposedDAG, node, op.type,
+                             a, U, w, current.opcard, proposed.opcard) {
+  logprior.ratios <- c(log(w/(1-w)), log((1-w)/w), log(1))
+  logprior.ratio <- logprior.ratios[op.type]
+  
+  logproposal.ratio <- log(current.opcard) - log(proposed.opcard)
+  
+  
+  if (op.type != 3) {
+    current_lml <- DW_nodelml(node, currentDAG, tXX, n, a, U)
+    proposed_lml <- DW_nodelml(node, proposedDAG, tXX, n, a, U)
+  } else {
+    current_lml <- DW_nodelml(node[1], currentDAG, tXX, n, a, U) +
+      DW_nodelml(node[2], currentDAG, tXX, n, a, U)
+    proposed_lml <- DW_nodelml(node[1], proposedDAG, tXX, n, a, U) +
+      DW_nodelml(node[2], proposedDAG, tXX, n, a, U)
+  }
+  
+  
+  acp.ratio <- min(0, proposed_lml - current_lml + logprior.ratio +
+                     logproposal.ratio)
+  is.accepted <- log(stats::runif(1)) < acp.ratio
+  
+  return(is.accepted)
+}
+
+
+
+new_bcdag <- function(x = list(), input = list(), type = "complete") {
+  stopifnot(is.list(x))
+  stopifnot(is.list(input))
+  type <- match.arg(type, c("complete", "compressed", "collapsed", "compressed and collapsed"))
+
+  structure(x,
+            class = "bcdag",
+            type = type,
+            input = input)
+}
+
+
+
+bd_decode <- function(string, separator = ";") {
+  vec4mat <- as.numeric(strsplit(string, separator)[[1]])
+  q <- length(vec4mat)
+  matrix(vec4mat, ncol = sqrt(q))
+}
+
+
+bd_encode <- function(matrix, separator = ";") {
+  paste(matrix, collapse = separator)
+}
+
+
+
+learn_DAG <- function(S, burn,
+                      data, a, U, w,
+                      fast = FALSE, save.memory = FALSE, collapse = FALSE,
+                      verbose = TRUE) {
+  
+  input <- as.list(environment())
+  
+  data_check <- sum(is.na(data)) == 0
+  S.burn_check <- is.numeric(c(S,burn)) & length(S) == 1 & length(burn) == 1
+  S.burn_check <- if (S.burn_check) {
+    S.burn_check & (S %% 1 == 0) & (burn %% 1 == 0) 
+  } else {
+    S.burn_check
+  }
+  a_check <- is.numeric(a) & (length(a) == 1) & (a > ncol(data) - 1)
+  w_check <- is.numeric(w) & (length(w) == 1) & (w <= 1) & (w >= 0)
+  U_check <- is.numeric(U) & (dim(U)[1] == dim(U)[2]) & (prod(eigen(U)$values) > 0) & isSymmetric(U)
+  U.data_check <- dim(U)[1] == ncol(data)
+  
+  if (data_check == FALSE) {
+    stop("Data must not contain NAs")
+  }
+  if (S.burn_check == FALSE) {
+    stop("S and burn must be integer numbers")
+  }
+  if (a_check == FALSE) {
+    stop("a must be at least equal to the number of variables")
+  }
+  if (w_check == FALSE) {
+    stop("w must be a number between 0 and 1")
+  }
+  if (U_check == FALSE) {
+    stop("U must be a squared symmetric positive definite matrix")
+  }
+  if (U.data_check == FALSE) {
+    stop("U must be a squared spd matrix with dimensions equal to the number of variables")
+  }
+  
+  n.iter <- input$burn + input$S
+  X <- scale(data, scale = FALSE)
+  tXX <- t(X)%*%X
+  
+  n <- dim(data)[1]
+  q <- dim(data)[2]
+  
+  
+  if (save.memory == TRUE) {
+    Graphs <- vector("double", n.iter)
+    L <- vector("double", n.iter)
+    D <- vector("double", n.iter)
+  } else {
+    Graphs <- array(0, dim = c(q,q,n.iter))
+    L <- array(0, dim = c(q,q,n.iter))
+    D <- array(0, dim = c(q,q,n.iter))
+  }
+  
+  currentDAG <- matrix(0, ncol = q, nrow = q)
+  
+  
+  if (save.memory == FALSE) {
+    type = "collapsed"
+    if (verbose == TRUE) {
+      cat("Sampling DAGs...")
+      pb <- utils::txtProgressBar(min = 2, max = n.iter, style = 3)
+    }
+    for (i in 1:n.iter) {
+      prop <- propose_DAG(currentDAG, fast)
+      is.accepted <- acceptreject_DAG(tXX, n,currentDAG, prop$proposedDAG,
+                                      prop$op.node, prop$op.type, a, U, w,
+                                      prop$current.opcard,
+                                      prop$proposed.opcard)
+      
+      if (is.accepted == TRUE) {
+        currentDAG <- prop$proposedDAG
+      }
+      
+      Graphs[,,i] <- currentDAG
+      if (verbose == TRUE) {
+        utils::setTxtProgressBar(pb, i)
+        close(pb)
+      }
+    }
+    if (collapse == FALSE) {
+      type = "complete"
+      if (verbose == TRUE) {
+        cat("\nSampling parameters...")
+        pb <- utils::txtProgressBar(min = 2, max = n.iter, style = 3)
+      }
+      for (i in 1:n.iter) {
+        postparams <- rDAGWishart1(1, Graphs[,,i], a, U,tXX, data)
+        L[,,i] <- postparams$L
+        D[,,i] <- postparams$D
+        if (verbose == TRUE) {
+          utils::setTxtProgressBar(pb, i)
+          close(pb)
+        }
+      }
+    }
+    Graphs <- Graphs[,,(burn+1):n.iter]
+    L <- L[,,(burn+1):n.iter]
+    D <- D[,,(burn+1):n.iter]
+  } else {
+    type = "compressed and collapsed"
+    if (verbose == TRUE) {
+      cat("Sampling DAGs...")
+      pb <- utils::txtProgressBar(min = 2, max = n.iter, style = 3)
+    }
+    for (i in 1:n.iter) {
+      prop <- propose_DAG(currentDAG, fast)
+      is.accepted <- acceptreject_DAG(tXX, n,currentDAG, prop$proposedDAG,
+                                      prop$op.node, prop$op.type, a, U, w,
+                                      prop$current.opcard,
+                                      prop$proposed.opcard)
+      
+      if (is.accepted == TRUE) {
+        currentDAG <- prop$proposedDAG
+      }
+      
+      Graphs[i] <- bd_encode(currentDAG)
+      if (verbose == TRUE) {
+        utils::setTxtProgressBar(pb, i)
+        close(pb)
+      }
+    }
+    if (collapse == FALSE) {
+      type = "compressed"
+      if (verbose == TRUE) {
+        cat("\nSampling parameters...")
+        pb <- utils::txtProgressBar(min = 2, max = n.iter, style = 3)
+      }
+      for (i in 1:n.iter) {
+        postparams <- rDAGWishart1(1, bd_decode(Graphs[i]), a, U,tXX, data)
+        L[i] <- bd_encode(postparams$L)
+        D[i] <- bd_encode(postparams$D)
+        if (verbose == TRUE) {
+          utils::setTxtProgressBar(pb, i)
+          close(pb)
+        }
+      }
+    }
+    Graphs <- utils::tail(Graphs, S)
+    L <- utils::tail(L, S)
+    D <- utils::tail(D, S)
+  }
+  
+  if (collapse == FALSE) {
+    out <- new_bcdag(list(Graphs = Graphs, L = L, D = D), input = input, type = type)
+  } else {
+    out <- new_bcdag(list(Graphs = Graphs), input = input, type = type)
+  }
+  return(out)
+}
+
+
+
+
+out_mcmc <- learn_DAG(S = 60000, burn = 5000, data = X, a = q,
+U = diag(1,q)/n, w = 0.5, fast = TRUE, collapse = FALSE)
+
+
+
+validate_bcdag <- function(bcdag) {
+  if (class(bcdag) != "bcdag") stop("learnDAG_output must be an object of class bcdag")
+  values <- unclass(bcdag)
+  input <- attr(bcdag, "input")
+  type <- attr(bcdag, "type")
+
+  q <- ncol(input$data)
+
+  if (type == "complete") {
+    if (length(values) != 3 & !is.array(values$Graphs) & !is.array(values$L) & !is.array(values$D) &
+        all(sapply(list(dim(values$Graphs), dim(values$L)), function(x) x == dim(values$D)))) {
+      stop(
+        "A complete bcdag object must contain a list of three qxqxS arrays",
+        call. = FALSE
+      )
+    }
+  }
+
+  if (type == "compressed") {
+    if (length(values) != 3 & !is.character(values$Graphs) & !is.character(values$L) &
+        !is.character(values$D) &
+        all(sapply(list(length(values$Graphs), length(values$L)), function(x) x == length(values$D)))) {
+      stop(
+        "A compressed bcdag object must contain a list of three characters vectors of length S",
+        call. = FALSE
+      )
+    }
+  }
+
+  if (type == "collapsed") {
+    if (length(values) != 1 & !is.array(values$Graphs) &
+        all(dim(values$Graphs) == c(q, q, input$S))) {
+          stop(
+            "A collapsed bcdag object must contain only a qxqxS array of sampled DAGs",
+            call. = FALSE
+          )
+        }
+  }
+  if (type == "compressed and collapsed") {
+    if (length(values) != 1 & !is.character(values$Graphs) & length(values$Graphs) == input$S) {
+      stop(
+        "A compressed and collapsed bcdag object must contain only a character vector of length S",
+        call. = FALSE
+      )
+    }
+  }
+  TRUE
+}
+
+
+
+
+summary.bcdag <- function(object, ...) {
+  learnDAG_output <- object
+  if (validate_bcdag(learnDAG_output) == FALSE) {
+    stop("learnDAG_output must be an object of class bcdag")
+  }
+
+  oldpar <- graphics::par(no.readonly = TRUE)
+  on.exit(graphics::par(oldpar))
+
+  type = attributes(learnDAG_output)$type
+  input = attributes(learnDAG_output)$input
+
+  cat("A ", type, " bcdag object containing ", input$S, " draws from",
+      ifelse(type == "collapsed" | type == "compressed and collapsed", " the posterior distribution of DAGs.", "the joint posterior over DAGs, L and D."),
+      "(Burnin =", input$burn, ").",
+      ifelse(type == "compressed" | type == "compressed and collapsed", "\n\nThe output is saved as strings (option save.memory = TRUE)", " "))
+  cat("\n\nPrior hyperparameters: ", "\nw = ", input$w, "\na = ", input$a, "\nU =")
+  print(U)
+
+  edgeprobs <- get_edgeprobs(learnDAG_output)
+  MPMdag <- get_MPMdag(learnDAG_output)
+  Graphsizes <- vector("double", input$S)
+  for (i in 1:input$S) {
+    if (type == "compressed" | type == "compressed and collapsed") {
+      Graphsizes[i] <- sum(bd_decode(learnDAG_output$Graphs[i]))
+    } else {
+      Graphsizes[i] <- sum(learnDAG_output$Graphs[,,i])
+    }
+  }
+  graphics::par(pty = "s")
+  gRbase::plot(methods::as(MPMdag, "graphNEL"), main = "Median probability DAG")
+  grDevices::devAskNewPage(ask = TRUE)
+  c = grDevices::gray.colors(20, start = 1, end = 0, gamma = 1, alpha = NULL)
+  print(lattice::levelplot(edgeprobs, xlab = "From", ylab = "Into", col.regions = c, main = "Probabilities of edge inclusion"))
+  print(lattice::histogram(Graphsizes, probability = TRUE, col = "grey", ylab = "% on total", main = "Distribution of DAGs size"))
+  grDevices::devAskNewPage(ask = FALSE)
+}
+
+
+
+get_diagnostics <- function(learnDAG_output) {
+
+  if (validate_bcdag(learnDAG_output) == FALSE) {
+    stop("learnDAG_output must be an object of class bcdag")
+  }
+
+  oldpar <- graphics::par(no.readonly = TRUE)
+  on.exit(graphics::par(oldpar))
+
+  type <- attributes(learnDAG_output)$type
+  input <- attributes(learnDAG_output)$input
+
+  if (type == "compressed" | type == "compressed and collapsed") {
+    S <- length(learnDAG_output$Graphs)
+    q <- ncol(bd_decode(learnDAG_output$Graphs[1]))
+    Graphs <- array(dim = c(q,q,S))
+    for (i in 1:S) {
+      Graphs[,,i] <- bd_decode(learnDAG_output$Graphs[i])
+    }
+  } else {
+    S <- input$S
+    q <- ncol(input$data)
+    Graphs <- learnDAG_output$Graphs
+  }
+Graphsizes <- vector("double", S)
+  for (i in 1:S) {
+    Graphsizes[i] <- sum(Graphs[,,i])
+  }
+cumedgesum <- Graphs
+  cumedgeprob <- Graphs
+  for (i in 2:S) {
+    cumedgesum[,,i] <- (cumedgesum[,,i] + cumedgesum[,,i-1])
+    cumedgeprob[,,i] <- cumedgesum[,,i]/i
+  }
+
+  tracematrices <- vector("list", q)
+  whcs <- vector("list", q)
+  for (j in 1:q) {
+    whc <- which(cumedgeprob[,j,S] != 0)
+    whcs[[j]] <- whc[order(cumedgeprob[whc, j, S], decreasing = TRUE)]
+    tracematrices[[j]] <- cumedgeprob[whcs[[j]],j,]
+  }
+ graphics::par(mfrow = c(1,2))
+  plot(1:S, Graphsizes, type = "l", xlab = "Iteration", ylab = "graph size", main = "", col = 1)
+  plot(1:S, cumsum(Graphsizes)/(1:S), type = "l", xlab = "Iteration", ylab = "average graph size", main = "", col = 2)
+  graphics::par(mfrow = c(2,3))
+  graphics::par(ask = TRUE)
+  if(q <= 30) {
+    for (j in 1:q) {
+      graphics::matplot(t(tracematrices[[j]]), type = "l", xlab = "Iteration", ylab = "prob. of inclusion", main = paste("Into node", j), ylim = c(0,1))
+      if (length(whcs[[j]]) != 0) graphics::legend("topleft", legend = utils::head(whcs[[j]], 6), col = 1:max(length(whcs[[j]]), 6), lty = 1, cex = 0.75)
+    }
+  } else {
+    randomnodes <- sample(1:q, 30)
+    for (j in randomnodes) {
+      graphics::matplot(t(tracematrices[[j]]), type = "l", xlab = "Iteration", ylab = "prob. of inclusion", main = paste("Into node", j), ylim = c(0,1))
+      if (length(whcs[[j]]) != 0) graphics::legend("topleft", legend = utils::head(whcs[[j]], 6), col = 1:max(length(whcs[[j]]), 6), lty = 1, cex = 0.75)
+    }
+  }
+}
+
+
+
+
+
+
+
+get_edgeprobs <- function(learnDAG_output) {
+
+  if (validate_bcdag(learnDAG_output) == FALSE) {
+    stop("learnDAG_output must be an object of class bcdag")
+  }
+
+  type <- attributes(learnDAG_output)$type
+  input <- attributes(learnDAG_output)$input
+
+
+  if (type == "compressed and collapsed" | type == "compressed") {
+    S <- length(learnDAG_output$Graphs)
+    q <- sqrt(length(bd_decode(learnDAG_output$Graphs[1])))
+    Graphs <- array(dim = c(q,q,S))
+    for (i in 1:S) {
+      Graphs[,,i] <- bd_decode(learnDAG_output$Graphs[i])
+    }
+  } else {
+    Graphs <- learnDAG_output$Graphs
+  }
+  edgeprobs <- apply(Graphs, c(1,2), mean)
+  colnames(edgeprobs) = rownames(edgeprobs) = 1:ncol(edgeprobs)
+  return(edgeprobs)
+}
+
+
+
+
+get_MPMdag <- function(learnDAG_output) {
+
+  if (validate_bcdag(learnDAG_output) == FALSE) {
+    stop("learnDAG_output must be an object of class bcdag")
+  }
+
+  edgeprobs <- get_edgeprobs(learnDAG_output)
+  MPM <- round(edgeprobs)
+  colnames(MPM) = rownames(MPM) = 1:ncol(MPM)
+  return(MPM)
+}
+
+
+
+get_MAPdag <- function(learnDAG_output) {
+
+  if (validate_bcdag(learnDAG_output) == FALSE) {
+    stop("learnDAG_output must be an object of class bcdag")
+  }
+
+  type <- attributes(learnDAG_output)$type
+
+  if (type == "compressed" | type == "compressed and collapsed") {
+    dag_code <- as.vector(sapply(out$Graphs, gsub, pattern = ";", replacement = ""))
+    q <- sqrt(nchar(dag_code[[1]]))
+  } else {
+    Graphs <- learnDAG_output$Graphs
+    dag_code <- apply(Graphs, 3, bd_encode, separator = "")
+    q <- dim(Graphs)[1]
+  }
+
+  uniq_dag <- unique(dag_code)
+  map_dagcode <- uniq_dag[which.max(tabulate(match(dag_code, uniq_dag)))]
+  map_dagcode <- bd_decode(map_dagcode, separator = "")
+  map_dag <- matrix(map_dagcode, ncol = q)
+  colnames(map_dag) = rownames(map_dag) = 1:ncol(map_dag)
+  return(map_dag)
+}
+
+
+
+
+
+
+
+
+
+
+
+
